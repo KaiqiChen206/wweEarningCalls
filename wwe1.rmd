@@ -1,0 +1,673 @@
+---
+title: "Unstructured Data Analytics HW1"
+author: "Kaiqi Chen"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include=FALSE}
+apikey = ""
+```
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(lubridate)
+library(tm)
+library(tidytext)
+library(widyr)
+library(wordcloud2)
+library(textstem)
+library(ggwordcloud)
+library(gganimate)
+library(doParallel)
+library(lexicon)
+library(textdata)
+```
+
+# The Data
+
+The data is on Sakai in the `data` folder. You will be working with the data in the file called *wweCalls*. You should use functions within R (e.g., `unzip` or `unz`) to unzip it.
+
+```{r, eval=FALSE}
+wwedata <- unzip("wweCalls.zip")
+```
+
+
+# Bronze
+
+## Step 1
+
+Read all of the parsed transcripts into R. You can do them individually, but that is a horrible idea and I don't recommend it. Instead, use the `list.files()` function and read files from the resultant object.</n>
+
+```{r, message=FALSE}
+names <- list.files(path = ".", pattern = ".*parsed.*\\.csv$")
+files <- lapply(names, read_csv)
+allCalls <- dplyr::bind_rows(files)
+```
+
+
+Perform some initial exploration of the text and perform any initial cleaning. This is entirely up to you to do whatever you consider necessary.
+</n>
+Delete what operator said. Idea of futrue analysis: see how analysts and leaders in WWE's sentiment change over time.
+
+### Cleaning
+
+Drop rows that first name is India. Those records may have some parsing errors. </n>
+What the operator say is not material.</n>
+We want to break down the text by organization. There are some rows that have NAs for organization.</n>
+
+```{r}
+allCalls2 <- allCalls %>% 
+  filter(name != "operator" & firstName != "India") %>% 
+  select(-ticker) %>% 
+  mutate(date = dmy(date), 
+         title = as.factor(title), 
+         organization = as.factor(organization)) %>% 
+  drop_na(organization)
+```
+
+
+Simplify the titles base on organization(wwe vs. non_wwe)
+
+```{r}
+allCall3 = allCalls2 %>% 
+  mutate(role = ifelse(str_detect(organization, "W.*W.*E.*"), "wwe", "outsider")) %>% 
+  mutate(role = as.factor(role)) %>% 
+  select(role, text, date, quarter) %>% 
+  mutate(text = str_replace_all(text, "\\(.*\\)", ""),
+         text = tolower(text),
+         text = lemmatize_strings(text),
+         text = stripWhitespace(text),
+         text = removeNumbers(text))
+
+calldates = distinct(allCall3, date) %>% 
+  arrange(desc(date))
+
+rmarkdown::paged_table(calldates)
+```
+
+Earnings calls usually happen four times a year, but 2010 and 2009 have 5 calls. If we look at the transcript on 2010-11-30 and 2009-03-18, we can see they are actually not earnings calls. So, need to exclude them.
+
+```{r}
+allCall3 = allCall3 %>% 
+  filter(date != ymd("2010-11-30") & date != ymd("2009-03-18"))
+```
+
+
+```{r, include=FALSE, eval=FALSE}
+## Create wordclou using functions in tm and wordcloud
+## tidier way using ggwordcloud is below
+analystCallsCorp = allCalls2 %>% 
+  filter(title == "Analyst") %>% 
+  pull(text) %>% 
+  VectorSource() %>% 
+  SimpleCorpus()
+
+stopWordRemoval = function(x) {
+  mystopwords = c("also", "thank", "year", "quarter")
+  removeWords(x, append(stopwords("en"), mystopwords))
+}
+
+textPrepFunctions = list(tolower,
+                         removePunctuation,
+                         lemmatize_strings,
+                         stopWordRemoval,
+                         removeNumbers,
+                         stripWhitespace)
+
+analystCallsCorp = tm_map(analystCallsCorp, FUN = tm_reduce, tmFuns = textPrepFunctions)
+
+analystCallsCorp[1][[1]]$content
+
+analystCallTokens = MC_tokenizer(analystCallsCorp)
+tokenCount = as.data.frame(summary(as.factor(analystCallTokens), maxsum = 5000))
+tokenCount = data.frame(
+  word = row.names(tokenCount),
+  freq = tokenCount[1],
+  row.names = NULL
+)
+as_tibble(tokenCount) %>% 
+  rename(freq = 2) %>% 
+  filter(freq > 25) %>% 
+  wordcloud2()
+```
+
+
+### Create a wordcloud using ggwordcloud
+```{r, message=FALSE}
+
+mystopwords = c("quarter", "business", "wwe", "million", "year")
+
+loughran_mcdonald_sw_df = data.frame(sw_loughran_mcdonald_long)
+colnames(loughran_mcdonald_sw_df) = c("word")
+
+tokens = allCall3 %>%
+  unnest_tokens(word, text) %>%
+  anti_join(loughran_mcdonald_sw_df) %>%
+  filter(!(word %in% mystopwords)) %>% 
+  group_by(role) %>%
+  count(word) %>% 
+  mutate(freq = n/sum(n)) %>% 
+  top_n(n=40, wt = freq)
+
+tokens %>% 
+  ggplot(aes(label = word, size = freq,
+             color = role))+
+  geom_text_wordcloud_area()+
+  scale_size_area(max_size = 15)+
+  theme_minimal()+
+  facet_wrap(~role)
+```
+
+### Top 10 earning call words over time
+
+
+Animation code adopted from [stackoverflow](https://stackoverflow.com/questions/53162821/animated-sorted-bar-chart-with-bars-overtaking-each-other)
+
+
+```{r}
+tokens2 = allCall3 %>%
+  unnest_tokens(word, text) %>%
+  anti_join(stop_words) %>%
+  filter(!(word %in% mystopwords))
+
+callTf <- tokens2 %>% 
+  group_by(date) %>%
+  count(word) %>%
+  mutate(freq = n/sum(n)) %>%
+  # The * 1 makes it possible to have non-integer ranks while sliding
+  mutate(rank = rank(-freq, ties.method = "first") * 1) %>%
+  filter(rank<=10) %>% 
+  mutate(times = as.character(date)) %>% 
+  ungroup()
+```
+
+```{r, eval = FALSE}
+p <- ggplot(callTf, aes(rank, group = word, 
+                     fill = as.factor(word), color = as.factor(word))) +
+  geom_tile(aes(y = freq/2,
+                height = freq,
+                width = 0.5), alpha = 0.8, color = NA) +
+
+  # text in x-axis (requires clip = "off" in coord_*)
+  # paste(country, " ")  is a hack to make pretty spacing, since hjust > 1 
+  #   leads to weird artifacts in text spacing.
+  geom_text(aes(y = 0, label = paste(word, " ")), vjust = 0.2, hjust = 1) +
+
+  coord_flip(clip = "off", expand = FALSE) +
+  scale_y_continuous(labels = scales::comma) +
+  scale_x_reverse() +
+  guides(color = FALSE, fill = FALSE) +
+
+  labs(title='{closest_state}', x = "", y = "Frequency") +
+  theme(plot.title = element_text(hjust = 0, size = 22),
+        axis.ticks.y = element_blank(),  # These relate to the axes post-flip
+        axis.text.y  = element_blank(),  # These relate to the axes post-flip
+        plot.margin = margin(1,1,1,4, "cm")) +
+  #facet_wrap(~role)+
+  transition_states(times, transition_length = 5, state_length = 25) +
+  ease_aes('quadratic-in-out')
+
+animate(p, fps = 15, duration = 40, width = 800, height = 600)
+
+#anim_save("wweWordFreq.gif", animation = last_animation(), path = "G:/My Drive/Mod3/Unstructure/HW1/")
+```
+
+![](G:/My Drive/Mod3/Unstructure/HW1/wweWordFreq.gif)
+
+
+```{r, include=FALSE, eval=FALSE}
+# DO NOT RUN
+# Use ggwordcloud + gganimate to create dynamic wordcloud:
+# 
+# https://cran.r-project.org/web/packages/ggwordcloud/vignettes/ggwordcloud.html
+# https://towardsdatascience.com/animating-your-data-visualizations-like-a-boss-using-r-f94ae20843e3
+# gganimate does not support ggwordcloud very well. 
+# state_length parameter does not provide any control
+
+
+tokens3 = allCall3 %>%
+  unnest_tokens(word, text) %>%
+  anti_join(stop_words) %>%
+  filter(!(word %in% mystopwords)) %>%
+  group_by(role, date) %>%
+  count(word) %>%
+  mutate(freq = n/sum(n)) %>%
+  top_n(n = 20, wt = freq)
+
+tokens3 %>%
+  mutate(frame_time = as.numeric(date)) %>%
+  ggplot(aes(label = word, size = freq,
+             color = role))+
+  geom_text_wordcloud_area()+
+  scale_size_area(max_size = 15)+
+  theme_minimal()+
+  facet_wrap(~role)+
+  transition_states(frame_time, transition_length = 2,
+                    state_length = 5)
+```
+
+
+```{r, eval=FALSE, include=FALSE}
+# Correlations
+
+# analystCor = allCalls2 %>% 
+#   filter(title == "Analyst") %>% 
+#   mutate(text = removeWords(tolower(text), c(stopwords('en'), "okay", "thank"))) %>%
+#   split(., .$date) %>% 
+#   lapply(., function(x){
+#     songTokens = unnest_tokens(x, words, text)
+#     tokenCount = dplyr::count(songTokens, words, sort = TRUE)
+#     total = tokenCount %>% 
+#       select(n) %>% 
+#       sum()
+#     tokenCount = data.frame(count = tokenCount[,2], 
+#                             word = tokenCount$words,
+#                             total = total,
+#                             song = x$song,
+#                             row.names = NULL)
+#     return(tokenCount)
+#   })
+# 
+# analystTF = do.call("rbind", analystTF)
+# rmarkdown::paged_table(analystTF)
+```
+
+```{r, eval=FALSE, include=FALSE}
+# a = analystCor[[1]] %>% 
+#   unnest_tokens(., words, text) %>% 
+#   dplyr::count(words, sort=TRUE) %>% 
+#   select(n) %>% 
+#   sum()
+# 
+# a$words
+```
+
+
+```{r, eval=FALSE, include=FALSE}
+# analystCor[analystCor$item1 == "performance",] %>% 
+#   rmarkdown::paged_table()
+```
+
+
+## Step 2
+
+Perform sentiment analyses on the texts. Given that these are earnings calls, you will likely want to use Loughran and McDonald's lexicon. This lexicon can be found in the `lexicon` package and in the `textdata` package. You should also explore the various `nrc` lexicons. Exploring the versions offered in `textdata` is a good start. Select any of the emotions from the various `nrc` lexicons (found within `textdata`) and perform sentiment analyses using that particular emotion. A good approach would be to use the words found within `textdata` and find them within `lexicon`.
+
+Below is an example of how you might get data from `textdata`. 
+
+```{r, eval = FALSE}
+library(textdata)
+library(tidytext)
+library(lexicon)
+get_sentiments("nrc")
+
+nrcWord <- textdata::lexicon_nrc()
+
+nrcValues <- lexicon::hash_sentiment_nrc
+
+nrcDominance <- textdata::lexicon_nrc_vad()
+
+nrcEmotions <- textdata::lexicon_nrc_eil()
+
+nrcEmotionsLex <- lexicon::hash_nrc_emotions
+
+# You will likely want to make good use of %in% or filter.
+```
+
+How you choose to aggregate sentiment is entirely up to you, but some reasonable ideas would be to aggregate them by indiviual, by role within the call, or the call as a whole. What can be learned about the sentiment from call to call?
+
+### Using Loughran and McDonald's lexicon
+</n>
+beginning cols: role, date, word</n>
+mid: role, date, word, sentiment</n>
+
+```{r}
+lmEmotions <- get_sentiments(lexicon = "loughran")
+tokens2 %>% 
+  inner_join(lmEmotions) %>% 
+  filter(sentiment == c("positive", "negative")) %>% 
+  group_by(role) %>% 
+  count(sentiment) %>% 
+  mutate(freq = n/sum(n)) %>% 
+  ggplot(aes(x = sentiment, y = freq, fill = sentiment)) +
+    geom_bar(stat="identity")+
+    geom_text(aes(label = round(freq,2)), vjust = -0.3)+
+    facet_wrap(~role)+
+    theme(panel.grid = element_blank(),
+          axis.ticks.x = element_blank())
+```
+
+Overall, outsider used more negative words vs. positivie words. For people from WWE, it is reversed.
+
+### Use nrc lexicon
+
+</br>
+
+#### How joyness change overtime
+
+```{r}
+tokens2 %>% 
+  inner_join(hash_nrc_emotions, by = c("word"="token")) %>% 
+  filter(emotion=="joy") %>% 
+  inner_join(lexicon_nrc_eil(), by = c("word"="term")) %>% 
+  filter(emotion == AffectDimension) %>% 
+  group_by(date) %>% 
+  summarise(joyness = mean(score)) %>% 
+  ggplot(aes(x = date, y = joyness))+
+    geom_line()+
+    theme_minimal()
+```
+
+</br>
+Based on the score associated with joy, it seems the joyness in the earning calls does not change too much. It generally ranges from 0.4 to 0.5, with 2 quarters below 0.4. However, the score below 0.5 means that the intensity of joy is not very high. There seems to be an slight upward trend since 2004.
+
+#### How does positivity change for each earning call?
+
+```{r, message=FALSE}
+library(sentimentr)
+library(lexicon)
+library(magrittr)
+sentiments = sentiment(get_sentences(allCall3), 
+          polarity_dt = lexicon::hash_sentiment_nrc,
+          valence_shifters_dt = lexicon::hash_valence_shifters) %>% 
+  group_by(date) %>% 
+  summarize(meanSentiment = mean(sentiment))
+
+sentiments %>% 
+  ggplot(aes(x= date, y = meanSentiment)) +
+    geom_line()+
+    theme_minimal()
+```
+
+
+</br>
+The sentiment is not very positive in general. And it peaked in Q4 2007. The positivity is increasing until 2008, then it tanked. 
+
+```{r}
+sentiments2 = sentiment(get_sentences(allCall3), 
+          polarity_dt = lexicon::hash_sentiment_loughran_mcdonald,
+          valence_shifters_dt = lexicon::hash_valence_shifters) %>% 
+  group_by(date) %>% 
+  summarize(meanSentiment = sum(sentiment))
+
+sentiments2 %>% 
+  ggplot(aes(x= date, y = meanSentiment)) +
+    geom_line()+
+    theme_minimal()
+```
+
+
+# Silver
+
+## Step 3
+
+Register for a free API key from <a href"https://www.alphavantage.co/documentation/">alphavantage</a>. Using your API key, get the daily time series for the given ticker and explore the 10 trading days around each call's date (i.e., the closing price for 5 days before the call, the closing price for the day of the call, and the closing price for the 5 days after the call). Do any visible patterns emerge when exploring the closing prices and the sentiment scores you created? Explain what this might mean for people wanting to make decisions based upon a call.
+
+```{r, message=FALSE}
+wweLink <- paste0("https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=WWE&outputsize=full&datatype=csv&apikey=",apikey)
+
+wwePrice <- read_csv(wweLink)
+#write_csv(wwePrice,"G:/My Drive/Mod3/Unstructure/HW1/wwePrice.csv")
+```
+
+```{r, message=FALSE}
+earningDates <- allCall3 %>% 
+  distinct(date)
+
+prices <- wwePrice %>%
+  mutate(date = ymd(timestamp))
+
+earningRow <- which(prices$date %in% earningDates$date)
+
+# this function is used to select indexes of the 10 day 
+# records around earnings calls
+selectRows <- function(x){
+  indexes <- c()
+  daysFromEarning <- c()
+  group <- c()
+  for(i in 1:length(x)){
+    for(j in -5:5){
+      indexes = append(indexes, x[i]+j)
+      daysFromEarning = append(daysFromEarning, -j)
+      group = append(group, i) # group is create to fill NAs in following step
+    }
+  }
+  df = cbind(indexes, daysFromEarning, group)
+  return (df)
+}
+rowsToKeep <- selectRows(earningRow)
+
+aroundEarningP <- prices[rowsToKeep[,1],]
+aroundEarningP <- aroundEarningP %>% 
+  mutate(daysFromEarning = rowsToKeep[,2], group = rowsToKeep[,3]) %>% 
+  select(date, close, daysFromEarning, group)
+
+aroundEarningP2 <- allCall3 %>% 
+  select(date, quarter) %>% 
+  distinct(date, quarter) %>% 
+  mutate(earningDate = date) %>% 
+  right_join(aroundEarningP) %>% 
+  left_join(sentiments2) %>% 
+  group_by(group) %>% 
+  fill(c(quarter,meanSentiment, earningDate), .direction = "updown") %>% 
+  ungroup() %>% 
+  mutate(year = year(date), 
+         group = as.factor(group),
+         period = if_else(daysFromEarning>0, "after", 
+                          if_else(daysFromEarning == 0, "earning", "before"))) %>% 
+  group_by(earningDate) %>% 
+  mutate(pct_change = close/lead(close)-1) %>% # return calculation(useful but not used)
+  ungroup()
+
+# calculate the 5-day mean prices before and after earnings call
+aroundEarningP3 <- aroundEarningP2 %>% 
+  group_by(earningDate, period) %>% 
+  mutate(price_mean = mean(close)) %>% 
+  filter(period != "earning") %>% 
+  distinct(earningDate, meanSentiment, price_mean) 
+
+# pivot the tibble to draw the line segments in ggplot
+aroundEarningP_p <- aroundEarningP3 %>% 
+  pivot_wider(names_from = period, values_from = price_mean) %>% 
+    mutate(change_in_price = after/before-1)
+
+aroundEarningP_p %>% 
+  ggplot(aes(x = earningDate))+
+    geom_linerange(aes(ymin = before,ymax = after, color = change_in_price, size = 0.1))+
+    scale_color_gradient(low = "red", high = "green")+
+    geom_point(data = aroundEarningP3,
+               aes(x = earningDate,
+                   y = price_mean,
+                   size = 0.1,
+                   shape = period,
+                   alpha = 0.5))+
+    guides(size="none", alpha = "none")+
+    labs(title = "5-day mean price varies after earning call")
+```
+
+In this chart, the 5-day mean price changes after earning calls. Sometimes it changes a lot, other times not so much. Sometimes it increases, sometimes decreases. Is the change correlated with earnings call sentiment?
+
+```{r, message=FALSE}
+aroundEarningP_p %>% 
+  mutate(price_change_after_earning = after/before-1) %>% 
+  ggplot(aes(x = meanSentiment, y = price_change_after_earning))+
+    geom_point()+
+    geom_smooth()+
+    labs(title = "Change in 5 day mean price after earning vs sentiment")
+```
+
+It looks 5-day mean price increase at sentiment score between 10-20. At 20-30 sentiment score, the mean price decreases. So, if someone is going to have a long position on WWE, a sentiment score of 10-20 is a good indicator. Even if the price decreses, it won't drop too much in the time period. This score interval has more upside potential.
+
+
+# Platinum
+
+## Step 4
+
+There are two calls within the zip file that you did not use for the previous steps -- they are not already parsed. If you are able to parse them, incorporate them into the rest of your data and determine if any new information comes to light.
+
+```{r, message=FALSE}
+library(stringr)
+raws <- lapply(list.files(path = ".", pattern = ".*raw.*\\.csv$"), read.csv)
+```
+
+```{r, eval=FALSE, include=FALSE}
+# look ahead (?<=stuff)
+# look behind (?=stuff)
+raw1 <- raws[[1]]
+raw1 <- rename(raw1, "mess"=1) %>% 
+  mutate(mess = as.character(mess))
+symbol <- str_extract(raw1[1,], "(?<=NYSE\\:)[A-Z]*")
+quarter <- str_extract(raw1[2,], "Q\\d")
+year = str_extract(raw1[2,], "\\d{4}")
+earningDate = str_extract(raw1[3,], "[A-Za-z]*\\s\\d{1,2}\\,\\s\\d{4}") %>% 
+  str_remove("\\,")
+executives = raw1 %>% 
+  slice(which(raw1$mess=="Executives")[1]:which(raw1$mess=="Analysts")[1]) %>% 
+  slice(3:nrow(.)-1) %>% 
+  mutate(mess = str_replace(mess,"\\– ", "\\-")) %>% 
+  separate(mess, sep = "\\-", into = c("name", "title")) %>% 
+  mutate(name = str_squish(name), title = str_squish(title)) %>% 
+  mutate(organization = "WWE")
+
+analysts = raw1 %>% 
+  slice(which(raw1$mess=="Analysts")[1]:which(raw1$mess=="Operator")[1]) %>% 
+  slice(3:nrow(.)-1) %>% 
+  mutate(mess = str_replace(mess,"\\– ", "\\-")) %>% 
+  separate(mess, sep = "\\-", into = c("name", "organization")) %>% 
+  mutate(name = str_squish(name), organization = str_squish(organization)) %>% 
+  mutate(title = "Analyst")
+
+people = dplyr::union(executives,analysts)
+
+transcript = raw1 %>% 
+  slice(which(raw1$mess=="Operator")[1]:nrow(.))
+transcript = mutate(transcript, mess = str_replace_all(mess,"\\– ", "\\'"))
+
+transcript_1 <- transcript %>% 
+  mutate(speakOrder = cumsum(str_detect(mess, regex("\\w$"))),
+         name = if_else(str_detect(mess, regex("\\w$")), mess, NA_character_)) %>% 
+  group_by(speakOrder) %>% 
+  fill(name, .direction = "down") %>% 
+  filter(mess != name) %>% 
+  mutate(text = str_c(mess, collapse = " ")) %>% 
+  ungroup() %>% 
+  select(name, text) %>% 
+  distinct() %>% 
+  left_join(people, by = c("name"="name")) %>% 
+  mutate(symbol = symbol,
+         year = year,
+         quarter = quarter,
+         date = mdy(earningDate),
+         role = ifelse(str_detect(organization, "W.*W.*E.*"), "wwe", "outsider"),
+         role = as.factor(role))
+  
+```
+
+```{r, message=FALSE}
+library(stringdist)
+library(fuzzyjoin)
+processRaw <- function(x){
+  x <- rename(x, "mess"=1) %>% 
+    mutate(mess = as.character(mess))
+  symbol <- str_extract(x[1,], "(?<=NYSE\\:)[A-Z]*")
+  quarter <- str_extract(x[2,], "Q\\d")
+  year = str_extract(x[2,], "\\d{4}")
+  earningDate = str_extract(x[3,], "[A-Za-z]*\\s\\d{1,2}\\,\\s\\d{4}") %>% 
+    str_remove("\\,")
+  executives = x %>% 
+    slice(which(x$mess=="Executives")[1]:which(x$mess=="Analysts")[1]) %>% 
+    slice(3:nrow(.)-1) %>% 
+    mutate(mess = str_replace(mess,"\\– ", "\\-")) %>% 
+    separate(mess, sep = "\\-", into = c("name", "title")) %>% 
+    mutate(name = str_squish(name), title = str_squish(title)) %>% 
+    mutate(organization = "WWE")
+  
+  analysts = x %>% 
+    slice(which(x$mess=="Analysts")[1]:which(x$mess=="Operator")[1]) %>% 
+    slice(3:nrow(.)-1) %>% 
+    mutate(mess = str_replace(mess,"\\– ", "\\-")) %>% 
+    separate(mess, sep = "\\-", into = c("name", "organization")) %>% 
+    mutate(name = str_squish(name), organization = str_squish(organization)) %>% 
+    mutate(title = "Analyst")
+  
+  people = dplyr::union(executives,analysts)
+  
+  transcript = x %>% 
+    slice(which(x$mess=="Operator")[1]:nrow(.))
+  transcript = mutate(transcript, mess = str_replace_all(mess,"\\– ", "\\'"))
+  
+  parsed <- transcript %>% 
+    mutate(speakOrder = cumsum(str_detect(mess, regex("\\w$"))),
+           name = if_else(str_detect(mess, regex("\\w$")), mess, NA_character_)) %>% 
+    group_by(speakOrder) %>% 
+    fill(name, .direction = "down") %>% 
+    filter(mess != name) %>% 
+    mutate(text = str_c(mess, collapse = " ")) %>% 
+    ungroup() %>% 
+    select(name, text) %>% 
+    distinct() %>% 
+    ## Inner join drops operator's records
+    ## which is consistent with the methods in the first two sections
+    ## change this to left_join for a complete parse
+    ## fuzzy join to resolve a name discrepency between
+    ## transcript and info above transcript
+    ## maybe an overkill since there is only one name discrepency
+    stringdist_inner_join(., people, by = "name", 
+                          method = "jaccard",
+                          q = 2,
+                          distance_col = "distance",
+                          max_dist = .5) %>% 
+    mutate(symbol = symbol,
+           year = year,
+           quarter = quarter,
+           date = mdy(earningDate),
+           role = ifelse(str_detect(organization, "W.*W.*E.*"),
+                         "wwe", "outsider"),
+           role = as.factor(role))
+  return (parsed)
+}
+```
+
+```{r}
+parsedRaws <- lapply(raws, processRaw)
+
+newCalls = dplyr::bind_rows(parsedRaws) %>% 
+  select(name.x,role, text, date, quarter) %>% 
+  mutate(text = str_replace_all(text, "\\(.*\\)", ""),
+         text = tolower(text),
+         text = lemmatize_strings(text),
+         text = stripWhitespace(text),
+         text = removeNumbers(text)) 
+
+rmarkdown::paged_table(newCalls)
+```
+
+```{r, message=FALSE, warning=FALSE}
+tokens = newCalls %>%
+  unnest_tokens(word, text) %>%
+  anti_join(loughran_mcdonald_sw_df) %>%
+  filter(!(word %in% mystopwords)) %>% 
+  group_by(role) %>%
+  count(word) %>% 
+  mutate(freq = n/sum(n)) %>% 
+  top_n(n=25, wt = freq)
+
+tokens %>% 
+  ggplot(aes(label = word, size = freq,
+             color = role))+
+  geom_text_wordcloud_area()+
+  scale_size_area(max_size = 15)+
+  theme_minimal()+
+  facet_wrap(~role)
+```
+
+Comparing the wordcloud from previous one, a big difference is that WWE's frequent word changes from "event" to "content" and "network".
