@@ -1,0 +1,3 @@
+*.html linguist-detectable=false
+*.zip linguist-detectable=true
+*.gif linguist-detectable=false
