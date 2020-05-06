@@ -14,7 +14,7 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 ```{r, include=FALSE}
-apikey = ""
+apikey = "P1NZA1D1WTP26NHB"
 ```
 
 ```{r, message=FALSE, warning=FALSE}
@@ -34,18 +34,16 @@ library(textdata)
 
 # The Data
 
-The data is on Sakai in the `data` folder. You will be working with the data in the file called *wweCalls*. You should use functions within R (e.g., `unzip` or `unz`) to unzip it.
+The data is a Zip file containing WWE quarterly earning call transcripts from 2006 - 2010.
 
 ```{r, eval=FALSE}
 wwedata <- unzip("wweCalls.zip")
 ```
 
 
-# Bronze
+# Step 1 - Data Cleaning and DEA
 
-## Step 1
-
-Read all of the parsed transcripts into R. You can do them individually, but that is a horrible idea and I don't recommend it. Instead, use the `list.files()` function and read files from the resultant object.</n>
+Read all of the parsed transcripts into R. Use the `list.files()` function and read files from the resultant object.</n>
 
 ```{r, message=FALSE}
 names <- list.files(path = ".", pattern = ".*parsed.*\\.csv$")
@@ -54,15 +52,15 @@ allCalls <- dplyr::bind_rows(files)
 ```
 
 
-Perform some initial exploration of the text and perform any initial cleaning. This is entirely up to you to do whatever you consider necessary.
-</n>
-Delete what operator said. Idea of futrue analysis: see how analysts and leaders in WWE's sentiment change over time.
+## Cleaning
 
-### Cleaning
+From some basic examination on the file, there are some data cleaning need to be done.  
 
-Drop rows that first name is India. Those records may have some parsing errors. </n>
-What the operator say is not material.</n>
-We want to break down the text by organization. There are some rows that have NAs for organization.</n>
+### Invalid names, organization, and irrelavent person
+
+1. Drop rows that the first name is India. Those records may have some parsing errors.  
+2. What the operator say is not material.  
+3. We want to break down the text by organization. There are some rows that have NAs for organization.  
 
 ```{r}
 allCalls2 <- allCalls %>% 
@@ -74,8 +72,8 @@ allCalls2 <- allCalls %>%
   drop_na(organization)
 ```
 
-
-Simplify the titles base on organization(wwe vs. non_wwe)
+### Titles of each person
+Simplify the titles base on organization(wwe vs. non_wwe)  
 
 ```{r}
 allCall3 = allCalls2 %>% 
@@ -87,13 +85,15 @@ allCall3 = allCalls2 %>%
          text = lemmatize_strings(text),
          text = stripWhitespace(text),
          text = removeNumbers(text))
+```
 
+### Dates
+```{r}
 calldates = distinct(allCall3, date) %>% 
   arrange(desc(date))
 
 rmarkdown::paged_table(calldates)
 ```
-
 Earnings calls usually happen four times a year, but 2010 and 2009 have 5 calls. If we look at the transcript on 2010-11-30 and 2009-03-18, we can see they are actually not earnings calls. So, need to exclude them.
 
 ```{r}
@@ -141,7 +141,7 @@ as_tibble(tokenCount) %>%
 ```
 
 
-### Create a wordcloud using ggwordcloud
+## Create a wordcloud using ggwordcloud
 ```{r, message=FALSE}
 
 mystopwords = c("quarter", "business", "wwe", "million", "year")
@@ -167,13 +167,13 @@ tokens %>%
   facet_wrap(~role)
 ```
 
-### Top 10 earning call words over time
+## Top 10 earning call words over time
 
 
 Animation code adopted from [stackoverflow](https://stackoverflow.com/questions/53162821/animated-sorted-bar-chart-with-bars-overtaking-each-other)
 
 
-```{r}
+```{r, warning=FALSE, message=FALSE}
 tokens2 = allCall3 %>%
   unnest_tokens(word, text) %>%
   anti_join(stop_words) %>%
@@ -221,7 +221,7 @@ animate(p, fps = 15, duration = 40, width = 800, height = 600)
 #anim_save("wweWordFreq.gif", animation = last_animation(), path = "G:/My Drive/Mod3/Unstructure/HW1/")
 ```
 
-![](G:/My Drive/Mod3/Unstructure/HW1/wweWordFreq.gif)
+![](wweWordFreq.gif)
 
 
 ```{r, include=FALSE, eval=FALSE}
@@ -298,13 +298,12 @@ tokens3 %>%
 ```
 
 
-## Step 2
+# Step 2 - Sentiment Analysis
 
-Perform sentiment analyses on the texts. Given that these are earnings calls, you will likely want to use Loughran and McDonald's lexicon. This lexicon can be found in the `lexicon` package and in the `textdata` package. You should also explore the various `nrc` lexicons. Exploring the versions offered in `textdata` is a good start. Select any of the emotions from the various `nrc` lexicons (found within `textdata`) and perform sentiment analyses using that particular emotion. A good approach would be to use the words found within `textdata` and find them within `lexicon`.
 
-Below is an example of how you might get data from `textdata`. 
-
-```{r, eval = FALSE}
+```{r, eval = FALSE, include=FALSE}
+# Perform sentiment analyses on the texts. Given that these are earnings calls, it is suitable to use Loughran and McDonald's lexicon. This lexicon can be found in the `lexicon` package and in the `textdata` package. You should also explore the various `nrc` lexicons. Exploring the versions offered in `textdata` is a good start. Select any of the emotions from the various `nrc` lexicons (found within `textdata`) and perform sentiment analyses using that particular emotion. A good approach would be to use the words found within `textdata` and find them within `lexicon`.
+# Below is an example of how you might get data from `textdata`. 
 library(textdata)
 library(tidytext)
 library(lexicon)
@@ -323,14 +322,12 @@ nrcEmotionsLex <- lexicon::hash_nrc_emotions
 # You will likely want to make good use of %in% or filter.
 ```
 
-How you choose to aggregate sentiment is entirely up to you, but some reasonable ideas would be to aggregate them by indiviual, by role within the call, or the call as a whole. What can be learned about the sentiment from call to call?
 
-### Using Loughran and McDonald's lexicon
-</n>
-beginning cols: role, date, word</n>
-mid: role, date, word, sentiment</n>
+## Using Loughran and McDonald's lexicon
 
-```{r}
+Find the positive and negative sentiment score for people from WWE and outside of WWE using Loughran and McDonald's lexicon. Loughran and McDonald's lexicon is created for use with financial documents. This lexicon labels words with six possible sentiments important in financial contexts: "negative", "positive", "litigious", "uncertainty", "constraining", or "superfluous". Here we only look at words that associate with positive and negative sentiments. The percentage of words with positive sentiment vs. words with negative sentiment is calculated for each organization group.
+
+```{r, message=FALSE}
 lmEmotions <- get_sentiments(lexicon = "loughran")
 tokens2 %>% 
   inner_join(lmEmotions) %>% 
@@ -348,12 +345,14 @@ tokens2 %>%
 
 Overall, outsider used more negative words vs. positivie words. For people from WWE, it is reversed.
 
-### Use nrc lexicon
+## Using nrc lexicon
 
 </br>
+NRC emotion includes 8 types of emotion in the dictionary. They are anger, anticipation, disgust, fear, joy, sadness, surprise, and trust. Here we only look at words associated with joy. And we further find the intensity of joy emotion for these words.
 
-#### How joyness change overtime
+### How joyness change overtime
 
+The graph show how average joyness in the earning calls change over time.
 ```{r}
 tokens2 %>% 
   inner_join(hash_nrc_emotions, by = c("word"="token")) %>% 
@@ -370,9 +369,10 @@ tokens2 %>%
 </br>
 Based on the score associated with joy, it seems the joyness in the earning calls does not change too much. It generally ranges from 0.4 to 0.5, with 2 quarters below 0.4. However, the score below 0.5 means that the intensity of joy is not very high. There seems to be an slight upward trend since 2004.
 
-#### How does positivity change for each earning call?
+### How does positivity change for each earning call?
 
-```{r, message=FALSE}
+The `sentiment()` function in sentimentr package is a handy and smart way to quickly find out the sentiment without tokenizing the text. Its valence_shifter feature can add more accuracy to the analysis.
+```{r, message=FALSE, warning=FALSE}
 library(sentimentr)
 library(lexicon)
 library(magrittr)
@@ -406,17 +406,18 @@ sentiments2 %>%
 ```
 
 
-# Silver
+# Step 3 - Impact of earning call to stock price
 
-## Step 3
+In this step, let's explore whether the sentiments of the earning calls have impact on WWE's stock price.  
 
-Register for a free API key from <a href"https://www.alphavantage.co/documentation/">alphavantage</a>. Using your API key, get the daily time series for the given ticker and explore the 10 trading days around each call's date (i.e., the closing price for 5 days before the call, the closing price for the day of the call, and the closing price for the 5 days after the call). Do any visible patterns emerge when exploring the closing prices and the sentiment scores you created? Explain what this might mean for people wanting to make decisions based upon a call.
+The stock price history can be obtain from alphavantage's API.  
+Register for a free API key from <a href"https://www.alphavantage.co/documentation/">alphavantage</a>. Using the API key, get the daily time series for the given ticker and explore the 10 trading days around each call's date (i.e., the closing price for 5 days before the call, the closing price for the day of the call, and the closing price for the 5 days after the call).  
+Next, let's see if any visible patterns emerge when exploring the closing prices and the sentiment scores.  
 
 ```{r, message=FALSE}
 wweLink <- paste0("https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=WWE&outputsize=full&datatype=csv&apikey=",apikey)
 
 wwePrice <- read_csv(wweLink)
-#write_csv(wwePrice,"G:/My Drive/Mod3/Unstructure/HW1/wwePrice.csv")
 ```
 
 ```{r, message=FALSE}
@@ -508,11 +509,9 @@ aroundEarningP_p %>%
 It looks 5-day mean price increase at sentiment score between 10-20. At 20-30 sentiment score, the mean price decreases. So, if someone is going to have a long position on WWE, a sentiment score of 10-20 is a good indicator. Even if the price decreses, it won't drop too much in the time period. This score interval has more upside potential.
 
 
-# Platinum
+# Step 4 - Parse Unstructured Earning Call Transcript
 
-## Step 4
-
-There are two calls within the zip file that you did not use for the previous steps -- they are not already parsed. If you are able to parse them, incorporate them into the rest of your data and determine if any new information comes to light.
+There are two calls within the zip file that are not parsed to a structural format. The following code is a way to parse unstructured transcripts to a more structured/tidy format.
 
 ```{r, message=FALSE}
 library(stringr)
