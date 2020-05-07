@@ -14,7 +14,7 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 ```{r, include=FALSE}
-apikey = "P1NZA1D1WTP26NHB"
+apikey = "YOUR API KEY HERE"
 ```
 
 ```{r, message=FALSE, warning=FALSE}
